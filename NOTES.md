@@ -2,6 +2,20 @@
 
 This document explains every file in the repository, how they relate, and how the system works end-to-end. It is intended for developers maintaining or extending the project.
 
+
+TL;DR:
+
+It’s a Raspberry Pi app to take clear insect photos.
+
+It moves/auto-focuses a motorized stage to get sharp images.
+
+It stacks multiple shots into one sharper picture.
+
+It can label the insect using built‑in AI models.
+
+It manages saving/copying images (to USB), and controls the light and fan.
+
+
 ## 1) High-level architecture
 
 - Application type: PyQt5 desktop application targeting Raspberry Pi, with GStreamer live preview, `libcamera-still` capture, GPIO-driven motion and lighting, focus stacking, and ONNX-based image classification.

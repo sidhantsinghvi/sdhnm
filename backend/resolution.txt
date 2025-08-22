@@ -1,0 +1,38 @@
+The combination of the stepper motor, motor driver, and the chosen linear axis defines
+the minimum resolution for the motorized axis.
+
+The used components are:
+
+Linear axis: OWIS VT 45N
+- Travel: 25 mm
+- Spindle pitch: 0.5 mm
+- setting sensitivy: 5 µm
+
+Motor: Joy-IT NEMA17-02
+- Step angle: 1,8°
+- Shaft diameter: 5 mm
+- Current 1.68 A
+- 2 phase design
+
+Motor Driver: TMCM2209 Wetterott Breakout
+- Microstep resolution: 8, 16, 32, 64 Microsteps per Fullstep
+
+Therfore:
+Microstep resolution: 8
+- Microstep angle: 0.225°
+- Distance/Microstep: 0.015625 mm = 15.625 µm
+
+Microstep resolutuin: 16
+- Microstep angle: 0.1125°
+- Distance/Microstep: 0.00781 mm = 7.81 µm
+
+Microstep resolutuin: 32
+- Microstep angle: 0.05625°
+- Distance/Microstep: 0.003905 mm = 3.905 µm
+
+Microstep resolutuin: 64
+- Microstep angle: 0.028125°
+- Distance/Microstep: 0.0019525 mm = 1.9525 µm
+
+The setting sensitivy of the linear axis is 5 µm: a microstep resolution 
+of 32 is selected.

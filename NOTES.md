@@ -48,255 +48,165 @@ At runtime, the UI orchestrates hardware via the backend drivers, acquires image
    - Storage management → explorer lists folders; copy local→USB; delete local storage; update disk usage labels.
 4. Shutdown: UI exposes a shutdown button that disables motor and issues `sudo shutdown -h now`.
 
-## 3) Filesystem and data layout
+## 3) File-by-file notes (Standalone)
 
-- Local and USB roots use symlinks for shorter paths:
-  - `globals.LOCAL_DIR` symlinks to `globals.VOLUME_DIR` (e.g., `/mnt/ssd/`).
-  - `globals.USB_DIR` symlinks to the selected USB mount path under `globals.USB_MOUNT_DIRECTORY`.
-- Working directory: `<root>/<WORKING_DIR>` where `<root>` is local or USB symlink and `WORKING_DIR='Entomoscope_Images'`.
-- Session directories: timestamped folders (format in `globals.DIRECTORY_NAMING_FORMAT`).
-- Specimen folders: `Specimen_XXX` per individual.
-- Raw images for a specimen: `<session>/Specimen_XXX/RAW_Data/<Specimen_XXX_YYY>/<Specimen_XXX_YYY_ZZZ.png>`
-- Stacked outputs are placed next to the specimen folder: `<session>/Specimen_XXX/Stacked_<Specimen_XXX_YYY>.png`
+Top-level
+- `main.py`: Starts PyQt app and loads `Ui`. Cleans `~/l` and `~/u` symlinks. Fan controller optionally started.
+- `globals.py`: App constants: camera name, UI styles, stacking/autofocus params, directory naming, symlink paths.
+- `__init__.py`: Re-exports `backend`, `frontend`, `globals`.
 
----
+Frontend
+- `frontend/ui.py`: Main window. Wires controls, creates `Light`, `Motor`, `Switch`, wraps in `Axis`; autofocus routine using `FocusWidget`; take image/stack; start `Stacker`; classification; storage UI and USB handling.
+- `frontend/video_widget.py`: GStreamer widget rendering live preview into Qt.
+- `frontend/focus_widget.py`: GStreamer appsink to compute Laplacian sharpness for autofocus.
+- `frontend/image_camera.py`: Takes stills with `libcamera-still`.
+- `frontend/controller/stacking.py`: Aligns stack with ECC, Laplacian compositing.
+- `frontend/controller/stacker.py`: Background scanner to produce `Stacked_*.png`.
+- `frontend/controller/fan_controller.py`: Temp‑based fan control (Pi + 1‑Wire + gpiozero).
+- `frontend/controller/usb_device_watcher.py`: Watches `/media/entomoscope` for USBs.
 
-## 4) Top-level files
+Backend: GPIO devices and axis
+- `backend/configuration.py`: Pins, microstepping, speeds, axis distances/gaps.
+- `backend/components/axis.py`: Referencing via endstop, range/units conversion, move/position helpers. Calls `Motor` and `Switch`.
+- `backend/devices/motor.py`: pigpio waveforms, enable/disable, continuous and finite steps, `change_speed`.
+- `backend/devices/switch.py`: RPi.GPIO input.
+- `backend/devices/fan.py`, `light.py`: RPi.GPIO outputs (fan has PWM option).
+- `backend/devices/temperature_sensor.py`: Reads 1‑Wire temp sensor.
+- `backend/System.py`: Bring‑up script.
+- `backend/resolution.txt`: Microstep → µm resolution notes.
 
-### `main.py`
-- Creates a Qt `QApplication` and loads the main window (`Ui`) with `files/untitled.ui`.
-- Instantiates `FanController` (thread) but the `start()` is commented out.
-- Deletes `~/l` and `~/u` symlinks on startup (cleanup for device symlinks used later by the UI).
-- Important: Imports `Entomoscope.frontend...` modules using the package name `Entomoscope`. Ensure your folder/package is named `Entomoscope` or `PYTHONPATH` is set appropriately.
+Utils, Assets, Models
+- `utils/*`: disk space, date validation, int check.
+- `files/untitled.ui`, `files/imgs/*`, and additional ONNX.
+- `Models/*`: ONNX models for classification.
 
-### `globals.py`
-- Application-wide constants and defaults:
-  - Camera: `CAMERA_NAME` (used by GStreamer `libcamerasrc`).
-  - UI: icon sizes, checkbox styles.
-  - Stacking/Autofocus params: kernel sizes, Laplacian settings, RANSAC thresholds, number of stacks, offsets, etc.
-  - Filesystem: `WORKING_DIR`, directory naming format, symlink targets: `VOLUME_DIR`, `LOCAL_DIR`, `USB_DIR`.
-  - Global variable updated at runtime: `SHARPNESS` during autofocus.
-
-### `__init__.py` (root)
-- Re-exports `backend`, `frontend`, and `globals` for package import convenience.
-
----
-
-## 5) Backend (hardware layer)
-
-### `backend/configuration.py`
-- Hardware pin mappings and mechanical constants:
-  - Fan, temperature sensor, light pins.
-  - Motor driver pins (MS1, MS2, SPREAD, UART1/2, EN, STEP, DIRECTION).
-  - Motor behavior: microstep resolution, speed, steps per revolution.
-  - Axis parameters: distance per revolution (µm), physical length, top/bottom safety gaps, endstop switch pin.
-
-### `backend/components/axis.py`
-- Abstraction for a linear axis with a stepper motor and a limit switch.
-- Key capabilities:
-  - `reference()`: Enables axis, drives toward endstop fast until engaged, backs off slowly until released, sets zero at `gap_bottom` offset, marks “referenced”.
-  - Movement by distance (µm) or microsteps: `move_up_for`, `move_down_for`, with range checks; `move_to` absolute position.
-  - Position helpers: `highest_position()`, `middle_position()`, `get_position()`.
-  - Range/units utils: convert µm↔microsteps, enforce travel limits based on mechanical size and gaps.
-- Depends on a `Motor` object and a `Switch` object.
-
-### `backend/devices/motor.py`
-- Stepper motor control using the `pigpio` daemon waveforms:
-  - Configures pins using `pigpio` and builds a square-wave step train as a “wave”.
-  - Continuous turns: `turn_right`, `turn_left` (repeat wave until stopped).
-  - Finite movement: `turn_right_for(steps)`, `turn_left_for(steps)` using `wave_chain`, chunked for >65k steps.
-  - `change_speed(new_speed)`: regenerates the waveform with new delay; toggles spread mode for high speeds.
-  - `enable()`/`disable()` control the EN pin.
-
-### `backend/devices/fan.py`
-- Fan control using RPi.GPIO with optional PWM speed control via `GPIO.PWM`.
-- On/off and `fan_at_speed(duty_cycle)` (percent).
-
-### `backend/devices/light.py`
-- Simple GPIO output for illumination LED.
-
-### `backend/devices/switch.py`
-- Digital input wrapper for an endstop switch with `get_status()` returning boolean state.
-
-### `backend/devices/temperature_sensor.py`
-- Reads a 1‑Wire temperature sensor (e.g., DS18B20):
-  - Auto-loads kernel modules `w1-gpio` and `w1-therm` if needed.
-  - Parses `/sys/bus/w1/devices/*/w1_slave` to Celsius.
-
-### `backend/System.py`
-- A standalone bring-up/example script: constructs devices, references axis, moves it, toggles fan. Useful for hardware testing.
-
-### `backend/resolution.txt`
-- Notes calculating microstep resolutions and µm/step for various microstepping settings.
-
-### `backend/__init__.py`, `backend/components/__init__.py`, `backend/devices/__init__.py`
-- Convenience re-exports; not much logic.
+Known caveats (Standalone)
+- `Axis.enable_axis()` calls `self.motor.enable` (missing parentheses) — fix to `self.motor.enable()`.
+- UI variable names for focus buttons look swapped (`focus_in`/`focus_out` binding).
+- Hard‑coded ONNX paths in `ui.py` — prefer relative `./Models/…`.
 
 ---
 
-## 6) Frontend (application/UI layer)
+## 4) Plugin mode: what changes in code
 
-### `frontend/ui.py` (Main window controller)
-- Loads `files/untitled.ui` and binds UI elements (buttons, labels, lists, tree view, splash, galleries, etc.).
-- Embeds a live video widget (`VideoWidget`) and an image capture wrapper (`ImageCamera`).
-- Instantiates hardware and motion stack: `Light`, `Motor`, `Switch`, `Axis` using values from `backend/configuration.py`.
-- Drives workflows via button handlers:
-  - Stepper enable: enables the motor driver and immediately references the axis; toggles availability of related controls.
-  - Focus in/out: moves the axis by `globals.FOCUS_STEP_SIZE`.
-  - Autofocus: pauses live preview; starts `FocusWidget` pipeline receiving `appsink` frames; moves axis while sampling Laplacian variances; returns to peak sharpness; resumes preview.
-  - Take image: creates a new RAW folder for the current specimen; pauses preview; calls `ImageCamera.take_image`; resumes; updates free space.
-  - Take stack: similar but captures N images, moving between shots; restores previous position.
-  - Fuse stacks (checkbox): starts/stops `Stacker` background thread that scans for new stacks and produces `Stacked_*.png` via `Stacking`.
-  - Classify: captures a fresh image, preprocesses to NCHW float32, runs `model_outlier_detection.onnx` then `model.onnx` via `onnxruntime` CPU provider, updates the classification textbox.
-  - Storage: browse to select a session, create a new session, manage specimens, copy Local→USB (tree copy), delete local drive (recursive), update disk usage labels.
-  - File explorer and galleries: populate stacked/single image lists, clicking updates the main `bigimg` pixmap; supports fullscreen viewer with zoom controls.
-- USB device handling: maintains a list of available storage devices; symlinks `LOCAL_DIR` to `VOLUME_DIR` and `USB_DIR` to the selected USB path; re-roots the explorer to `WORKING_DIR` under the selected device.
-- Uses many helpers from `globals.py`, `utils/`, and other frontend modules.
+New dependencies
+- `pyserial` (e.g., `pip install pyserial`)
+- Arduino firmware:
+  - Option A: GRBL (speaks G‑code, homing `$H`, jogs `G0 Z…`, steps/mm via `$102`).
+  - Option B: Custom firmware (define your simple ASCII protocol, e.g., `HOME`, `MOVE +1234`, `MOVE -500`, `POS?`).
 
-### `frontend/video_widget.py`
-- Qt `QWidget` backed by a GStreamer pipeline rendering into an OpenGL sink embedded in the widget window ID.
-- Pipeline: `libcamerasrc camera-name="<globals.CAMERA_NAME>" ! videoscale ! videoflip method=counterclockwise ! glimagesink`.
-- Handles the `prepare-window-handle` sync-message to bind sink to the Qt window.
-- `start_pipeline()`/`pause_pipeline()` control playback.
+Device drivers (backend) – replace GPIO with serial
+- Add: `backend/devices/arduino_serial.py`
+  - Opens `/dev/ttyACM0` (configurable), 115200 baud (typical).
+  - Line‑based `write_command(...)` and `read_reply(...)`, with timeouts and error handling.
+- Add one of:
+  - `backend/devices/grbl_motor.py` (wrap GRBL): methods `home()`, `move_to(mm)`, `move_rel(mm)`, `get_pos_mm()`, `set_zero()`. Translate µm↔mm. Endstops handled by GRBL.
+  - or `backend/devices/arduino_motor.py` (custom proto): send `MOVE`/`HOME` commands; keep track of position if firmware reports it.
+- Optional lighting/fan:
+  - If LED dimmer is on Arduino: `backend/devices/arduino_light.py` (commands like `LIGHT ON`, `LIGHT PWM 128`).
+  - Otherwise keep existing `light.py` on Pi GPIO.
 
-### `frontend/focus_widget.py`
-- GStreamer pipeline with `appsink` to pull frames into Python and compute a Laplacian-variance sharpness metric with OpenCV.
-- Updates `globals.SHARPNESS` continuously while running; used by `Ui.do_autofocus()`.
-- Pipeline (conceptually): `libcamerasrc ... ! [resize] ! appsink emit-signals=True` where `[resize]` should be a converter/scaler producing a CPU-friendly pixel format.
+Axis component (backend/components/axis.py)
+- Keep the axis interface (reference, move_up_for, move_down_for, move_to).
+- Internally swap to call the new serial motor driver.
+  - `reference()` → call GRBL `$H` (home) or firmware `HOME`.
+  - `move_*`/`move_to` → issue G‑code `G0 Z…` or custom `MOVE …`.
+  - Positioning:
+    - With GRBL: read position with `?`/status (or track after setting `G92 Z0`).
+    - With custom: firmware should return current steps/position.
 
-### `frontend/image_camera.py`
-- Captures a single PNG still using `libcamera-still` CLI with retries and timeout, ensuring the output path is a file.
-- Logs and detects “device busy” to signal live preview must be paused while capturing.
+Configuration (backend/configuration.py)
+- For plugin mode:
+  - Remove/ignore unused GPIO motor pins; keep fields only if you continue using Pi GPIO for light/fan.
+  - Add serial port and motion parameters:
+    - `SERIAL_PORT = "/dev/ttyACM0"`
+    - `SERIAL_BAUD = 115200`
+    - `STEPS_PER_MM` or direct `MM_PER_REV` if using custom firmware.
+  - Axis geometry (distance per revolution, gaps) stays relevant for UI/labels and range validation. With GRBL you can rely more on firmware limits.
 
-### `frontend/controller/stacking.py`
-- Focus-stacking implementation:
-  - Aligns images pairwise using ECC translation (`cv2.findTransformECC`) to mitigate minor shifts between captures.
-  - Computes Laplacian maps (after Gaussian blur) and composites per-pixel maxima to pick the sharpest contributor at each pixel location.
-  - Returns a stacked image.
+UI wiring (frontend/ui.py)
+- Introduce a runtime “mode” switch:
+  - Env var: `ENTOMOSCOPE_MODE=standalone|plugin`
+  - or config flag in `globals.py`, e.g., `MODE = "plugin"`
+- On startup choose drivers:
+  - Standalone: `Motor`, `Switch`, `Light` (existing).
+  - Plugin: construct `GrblMotor` (or `ArduinoMotor`) via `ArduinoSerial`; optional `ArduinoLight`; no local `Switch` (endstops via firmware).
+- Reference and motion buttons continue to call `Axis`, which now talks over serial.
+- Autofocus, stacking, classification, storage — unchanged.
 
-### `frontend/controller/stacker.py`
-- Background thread scanning the working directory for new RAW image stacks not yet fused; runs `Stacking` and writes `Stacked_<specimen_folder>.png` outputs.
-- Skips if a stacked image already exists; logs progress.
-
-### `frontend/controller/fan_controller.py`
-- Background thread monitoring CPU and external sensor temperatures; runs fan at 60% duty if thresholds crossed for at least `globals.MIN_RUNTIME_FOR_FAN_IN_SEC`; on stop, turns fan off.
-
-### `frontend/controller/usb_device_watcher.py`
-- Watches `globals.USB_MOUNT_DIRECTORY` using `watchdog` for created/deleted directories; calls UI callbacks to update available devices.
-- On init, adds currently mounted USB devices (excludes local volume dir).
-
-### `frontend/__init__.py` and `frontend/controller/__init__.py`
-- Re-exports for convenience.
+USB watcher, camera, classification
+- Unchanged between modes.
 
 ---
 
-## 7) Utilities
+## 5) Step‑by‑step migration checklist
 
-### `utils/get_free_space.py`
-- Wraps `shutil.disk_usage` to return `(total_gib, used_gib, free_gib)` for a given path.
+1) Hardware
+- Assemble the Plugin variant (Arduino + CNC shield + LED dimmer, endstops wired to CNC shield).
+- Set GRBL steps/mm for your Z axis (`$102`), soft limits and homing if using GRBL, or flash your custom firmware.
 
-### `utils/is_int.py`
-- Predicate returning True if a string can be parsed to `int`.
+2) Pi software
+- `pip install pyserial`
+- Keep existing GStreamer/libcamera/OpenCV/ONNX deps.
 
-### `utils/validate_datetime.py`
-- Validates whether a string matches a datetime format; logs error on mismatch.
+3) Add plugin drivers (new files)
+- `backend/devices/arduino_serial.md` (design doc) and implement `.py` in code.
+- `backend/devices/grbl_motor.md` (design doc) and implement `.py` (or `arduino_motor.py`).
 
----
+4) Update configuration
+- Add `SERIAL_PORT`, `SERIAL_BAUD`, motion units (steps/mm or mm travel).
+- Keep axis travel/gaps consistent with your mechanical build.
 
-## 8) Assets, models, and UI definition
+5) Switch mode in UI
+- Add a small factory in `frontend/ui.py` to pick Standalone vs Plugin drivers based on env/config.
 
-### `files/untitled.ui`
-- Qt Designer file defining the window layout and named widgets; `Ui` loads and then looks up elements by object names.
+6) Test sequence
+- Connect Arduino, check `/dev/ttyACM0` permissions (`dialout` group).
+- Test homing/reference from the UI.
+- Test small relative moves, then autofocus.
+- Capture single and stacked images, verify `Stacked_*.png` creation.
+- Run classification.
 
-### `files/imgs/*`
-- PNG icons used by the UI (add, delete, arrows, brightness, autofocus, classify, USB, etc.).
-
-### `files/segment_insect_tiny_64.onnx`
-- An ONNX model artifact not currently referenced in code paths shown here; likely an experimental segmentation model.
-
-### `Models/model_outlier_detection.onnx`, `Models/model.onnx`
-- ONNX models loaded in `ui.py` for outlier detection and class prediction.
-
----
-
-## 9) Integration points and key sequences
-
-- Live preview: `Ui` holds a `VideoWidget` which starts a GStreamer pipeline rendering camera frames into a Qt widget.
-- Autofocus: `Ui.do_autofocus()`
-  1) Pause live preview.
-  2) Start `FocusWidget` (appsink). While moving along the axis in fixed steps, collect `globals.SHARPNESS` samples.
-  3) Stop `FocusWidget`, resume preview.
-  4) Move axis back down by `num_steps * step_size` to the best sharpness (argmax of measured series).
-- Capture workflows:
-  - Single: create a new specimen RAW folder; pause preview; `libcamera-still -n -e png -t 1 -o <path>`; resume; update disk usage.
-  - Stack: remember current axis position; move down slightly; loop N times: capture → move up; resume; return to starting position.
-- Stacking background job: when enabled via checkbox, `Stacker` scans all session/specimen RAW folders and writes stacked images for any missing outputs.
-- Classification: capture a fresh image, preprocess to `float32` NCHW scaled to [0,1], then:
-  1) Outlier detector: if prob > 0.5 → “other”.
-  2) Else class predictor: pick argmax and label string from `INDEX_TO_CLASS_PRED`.
-- USB device handling: a `watchdog` observer reports created/deleted directories under `/media/entomoscope`; UI updates the available devices list and symlinks the selected device to `globals.USB_DIR`.
+7) Lighting/Fan
+- If moved to Arduino: implement serial commands and update UI toggle handlers to call Arduino light driver.
+- If kept on Pi GPIO: keep current `light.py` and `fan_controller.py`.
 
 ---
 
-## 10) Known pitfalls and recommendations
+## 6) Mapping your wiki differences to software
 
-- Package import path:
-  - `main.py` imports from `Entomoscope.*`. Ensure the repository directory is named `Entomoscope` and you run the app as `python3 -m Entomoscope.main` from the parent directory, or otherwise adjust `PYTHONPATH`/package installation.
-
-- Axis enable bug:
-  - `Axis.enable_axis()` currently does `self.motor.enable` without parentheses. It should be `self.motor.enable()` to actually drive the EN pin low. This might prevent movement if the motor driver starts disabled.
-
-- UI button variables swapped:
-  - In `ui.py`, `focus_out = findChild('focus_in')` and `focus_in = findChild('focus_out')`. Verify naming in the `.ui` file; consider swapping assignments for clarity.
-
-- USB event filter logic:
-  - In `usb_device_watcher.py`, the conditional `if event.is_directory and (event.event_type != 'created' or event.event_type != 'deleted'):` will always be true for directories. It should likely be `and` to pass only non-created/non-deleted events, or better: explicitly handle `if event.event_type == 'created'` and `elif event.event_type == 'deleted'` (as the code already does) and drop the precondition entirely.
-
-- Hard-coded model paths:
-  - `ui.py` uses paths like `'./entomoscope-software/Entomoscope/Models/model.onnx'`. Consider using paths relative to this repo root (e.g., `'./Models/model.onnx'`) or package resources for portability.
-
-- GStreamer element naming:
-  - `focus_widget.py` uses `resize` in the pipeline. Ensure this element exists or replace with `videoscale ! videoconvert ! video/x-raw,format=BGR,width=...,height=...` as needed.
-
-- `libcamera-still` flags:
-  - The invocation uses `-t1`; commonly it is `-t 1`. Confirm parsing. Also `exposure_time` parameter is not applied; consider wiring it to `libcamera-still` flags.
-
-- Destructive actions:
-  - `main.py` removes `~/l` and `~/u` symlinks at startup. `Ui.delete_local_drive()` deletes all files under `globals.LOCAL_DIR`. Use with caution and ensure paths are correct.
-
-- Minor stability items:
-  - Multiple `QtCore` imports and some static method calls on `QMainWindow` where instance methods might be intended.
-  - Global variables like `pathSelectedDirectory` and `itemPath` could be encapsulated for clarity.
+- Electronics Base: “Installing the Arduino”, “Installing the CNC shield”, “Installing the LED dimmer”, “WAGO Clamp Adapter”
+  - Software: add serial driver(s), route motion/light over serial, add config for port/baud; GPIO for fan may remain Pi‑side.
+- Motor Frame/Mount, Linear Unit, Energy Chain
+  - Software: adjust axis range parameters; for GRBL set `$130…$132` (travel limits) and `$102` (steps/mm).
+- Camera, Lighting Assembly
+  - Software: unchanged capture pipeline; if dimmer via Arduino, add serial light commands.
+- “Installing the ENIMAS Software” / “Arduino Code”
+  - Software: this repo = Pi side; “Arduino Code” = flash GRBL or custom firmware.
 
 ---
 
-## 11) Extending the system
+## 7) Keep/Change summary per file
 
-- Adding a new classification model:
-  - Drop the ONNX into `Models/`, update paths in `ui.py`, and adjust preprocessing shape.
-- Headless or different sinks:
-  - If OpenGL sink is not available, replace `glimagesink` with a suitable sink (e.g., `ximagesink`, `udpsink`, or `fakesink`) in `video_widget.py`.
-- New motion stages:
-  - Implement additional axes via more `Motor`/`Switch` instances and extend `Axis` or create new component abstractions.
-- Storage destinations:
-  - Replace symlink model with mount points or network storage; adjust `globals.VOLUME_DIR` and USB watcher accordingly.
+Keep unchanged (both modes)
+- `frontend/video_widget.py`, `frontend/focus_widget.py`, `frontend/image_camera.py`, `frontend/controller/stacking.py`, `frontend/controller/stacker.py`, `frontend/controller/usb_device_watcher.py`, `utils/*`, `files/*`, `Models/*`.
+
+Change for Plugin mode
+- `backend/devices/motor.py` → replace with serial motor driver (`grbl_motor.py` or `arduino_motor.py`).
+- `backend/devices/switch.py` → remove or stub (endstops handled in firmware).
+- `backend/configuration.py` → add serial config; remove unused motor pin fields.
+- `backend/components/axis.py` → route to serial driver; reference via firmware; position queries via firmware or tracked.
+- `frontend/ui.py` → driver factory (mode switch), wire light optionally to Arduino.
+
+Optional
+- `frontend/controller/fan_controller.py` → keep on Pi, or re‑implement via Arduino commands if fan is moved.
 
 ---
 
-## 12) Quick dependency map
+## 8) Risks & tips
 
-- UI → Frontend
-  - `Ui` → `VideoWidget`, `ImageCamera`, `FocusWidget`, `Stacker`, `UsbDrivesWatcher`, utils, globals, backend hardware classes.
-- Hardware
-  - `Axis` → `Motor`, `Switch`
-  - `FanController` → `Fan`, `TemperaureSensor`, `gpiozero.CPUTemperature`
-- Imaging
-  - Live: GStreamer `libcamerasrc` pipeline → `VideoWidget`
-  - Still: `libcamera-still` → `ImageCamera`
-  - Stacking: OpenCV/PIL → `Stacking` → `Stacker`
-  - Classification: `onnxruntime` → models in `Models/`
-- Storage
-  - USB events: `watchdog` → `UsbDrivesWatcher`
-  - Disk space: `shutil.disk_usage` → `get_free_space_in_gb`
-
-This concludes the per-file description and system context. Use this as a reference for debugging, extending, and onboarding new contributors.
+- Homing consistency: ensure firmware zero matches UI expectation. If using GRBL, call `G92 Z0` after `$H` if you want a local Z=0.
+- Units: UI works in µm; GRBL works in mm. Convert reliably and clamp to limits.
+- Timeouts: add serial read timeouts and robust error handling.
+- Permissions: add `pi` user to `dialout` for `/dev/ttyACM0`.
+- Lighting dimmer: PWM ranges differ per dimmer; document expected range (0–255, 0–100%).
